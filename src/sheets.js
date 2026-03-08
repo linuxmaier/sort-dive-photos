@@ -1,7 +1,7 @@
 // Google Sheets API wrapper using direct REST calls.
 // All reads fall back to IndexedDB cache when offline.
 
-import { getToken, signIn } from './auth.js';
+import { getToken, tryRefreshToken } from './auth.js';
 import { setCacheEntry, getCacheEntry } from './db.js';
 
 let SHEET_ID = null;
@@ -12,7 +12,13 @@ export function initSheets(sheetId) {
 
 async function authFetch(url, options = {}) {
   let token = getToken();
-  if (!token) token = await signIn();
+  if (!token) {
+    // Never show an interactive prompt from API code — just throw so callers
+    // can fall back to cache or queue. tryRefreshToken() is silent and fast.
+    if (!navigator.onLine) throw new Error('offline');
+    token = await tryRefreshToken();
+    if (!token) throw new Error('no valid token');
+  }
   const res = await fetch(url, {
     ...options,
     headers: {

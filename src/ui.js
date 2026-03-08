@@ -1,5 +1,5 @@
 import CONFIG from '../config.js';
-import { initAuth, signIn, signOut, isSignedIn, getUserEmail } from './auth.js';
+import { initAuth, signIn, signOut, isKnownUser, getToken, tryRefreshToken, getUserEmail } from './auth.js';
 import { initSheets, loadTrips, loadDives, loadTagHistory, addTrip, addDive, ensureHeaders } from './sheets.js';
 import { addPendingClip, getPendingClips, deletePendingClip } from './db.js';
 import { syncPending, setupConnectivitySync, getPendingCount } from './sync.js';
@@ -436,11 +436,13 @@ export async function init() {
   await initAuth(CONFIG.GOOGLE_CLIENT_ID);
   initSheets(CONFIG.SHEET_ID);
 
-  // Auth gate
-  if (!isSignedIn()) {
+  // Auth gate: only block on whether the user has ever signed in on this device.
+  // A missing/expired token is handled gracefully inside afterSignIn().
+  if (!isKnownUser()) {
     showPage('page-auth');
     $('sign-in-btn').onclick = async () => {
       await signIn();
+      await getUserEmail(); // persist email to localStorage
       await afterSignIn();
     };
     return;
@@ -448,9 +450,42 @@ export async function init() {
   await afterSignIn();
 }
 
+function showTokenBanner(show) {
+  const banner = $('token-banner');
+  if (show) {
+    banner.classList.remove('hidden');
+    $('token-signin-btn').onclick = async () => {
+      await signIn();
+      await getUserEmail();
+      banner.classList.add('hidden');
+      // Now that we have a token, sync anything pending and reload data
+      await syncPending();
+      try {
+        await ensureHeaders();
+        [state.trips, state.dives, state.tagHistory] = await Promise.all([
+          loadTrips(), loadDives(), loadTagHistory(),
+        ]);
+        renderTripSelect();
+      } catch {}
+      await updatePendingBadge();
+    };
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
 async function afterSignIn() {
   showPage('page-tag');
-  $('user-email').textContent = (await getUserEmail()) ?? '';
+  // Show stored email immediately — no network call needed
+  $('user-email').textContent = localStorage.getItem('sdp_email') ?? '';
+
+  // Try a silent token refresh. This is fast and non-blocking when online,
+  // and returns null immediately when offline.
+  if (navigator.onLine) await tryRefreshToken();
+
+  // Show a persistent banner if we still have no token (e.g. mid-flight with
+  // an expired token). The app is fully usable; tagging queues to IndexedDB.
+  showTokenBanner(!getToken());
 
   // Load data (with offline fallback built into sheets.js)
   try {
@@ -460,7 +495,11 @@ async function afterSignIn() {
     ]);
   } catch (err) {
     console.warn('Failed to load from Sheets, using cache:', err);
-    setStatus('Offline — using cached data.', false);
+    if (!getToken()) {
+      setStatus('Using cached data — will sync when you re-authenticate.', false);
+    } else {
+      setStatus('Offline — using cached data.', false);
+    }
   }
 
   renderTripSelect();
@@ -468,8 +507,10 @@ async function afterSignIn() {
   await updatePendingBadge();
   await checkForSharedFiles();
 
-  // Connectivity sync
+  // Connectivity sync — also attempt silent token refresh when we come online
   setupConnectivitySync(async (result) => {
+    await tryRefreshToken();
+    showTokenBanner(!getToken());
     if (result.synced) setStatus(`Synced ${result.synced} pending clip${result.synced > 1 ? 's' : ''}.`);
     await updatePendingBadge();
   });

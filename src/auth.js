@@ -1,5 +1,13 @@
 // Google OAuth via Google Identity Services (token model).
 // No backend required — tokens are short-lived and stored in localStorage.
+//
+// Two separate concepts:
+//   isKnownUser()     — has this person ever signed in on this device? (persistent, no expiry)
+//   getToken()        — is there a live API token right now? (expires after ~1 hour)
+//
+// The UI only requires isKnownUser(). A live token is only needed for Sheets API calls,
+// which queue to IndexedDB when unavailable. This means the app works fully offline
+// even if the token expired mid-flight.
 
 const SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets',
@@ -7,24 +15,33 @@ const SCOPES = [
 ].join(' ');
 
 let tokenClient = null;
-let resolveSignIn = null;
+let pendingResolve = null;
+
+function onTokenResponse(response) {
+  if (response.error || !response.access_token) {
+    if (pendingResolve) { pendingResolve(null); pendingResolve = null; }
+    return;
+  }
+  const expiry = Date.now() + (response.expires_in - 60) * 1000;
+  localStorage.setItem('sdp_token', response.access_token);
+  localStorage.setItem('sdp_token_expiry', expiry);
+  if (pendingResolve) { pendingResolve(response.access_token); pendingResolve = null; }
+}
+
+function onTokenError() {
+  if (pendingResolve) { pendingResolve(null); pendingResolve = null; }
+}
 
 export function initAuth(clientId) {
   return new Promise((resolve) => {
-    // GIS library loads async; poll until ready
     const wait = setInterval(() => {
       if (window.google?.accounts?.oauth2) {
         clearInterval(wait);
         tokenClient = google.accounts.oauth2.initTokenClient({
           client_id: clientId,
           scope: SCOPES,
-          callback: (response) => {
-            if (response.error || !response.access_token) return;
-            const expiry = Date.now() + (response.expires_in - 60) * 1000;
-            localStorage.setItem('sdp_token', response.access_token);
-            localStorage.setItem('sdp_token_expiry', expiry);
-            if (resolveSignIn) { resolveSignIn(response.access_token); resolveSignIn = null; }
-          },
+          callback: onTokenResponse,
+          error_callback: onTokenError,
         });
         resolve();
       }
@@ -39,10 +56,34 @@ export function getToken() {
   return null;
 }
 
+// Has this person ever signed in on this device?
+export function isKnownUser() {
+  return !!localStorage.getItem('sdp_email');
+}
+
+// Try to get a token silently — no UI popup.
+// Returns the token string, or null if offline or refresh fails.
+export function tryRefreshToken() {
+  return new Promise((resolve) => {
+    const existing = getToken();
+    if (existing) { resolve(existing); return; }
+    if (!navigator.onLine || !tokenClient) { resolve(null); return; }
+
+    pendingResolve = resolve;
+    tokenClient.requestAccessToken({ prompt: '' });
+
+    // Give up after 5s in case GIS doesn't respond (network issues)
+    setTimeout(() => {
+      if (pendingResolve === resolve) { pendingResolve = null; resolve(null); }
+    }, 5000);
+  });
+}
+
+// Interactive sign-in — shows the Google account picker UI.
 export function signIn() {
   return new Promise((resolve) => {
-    resolveSignIn = resolve;
-    tokenClient.requestAccessToken({ prompt: '' });
+    pendingResolve = resolve;
+    tokenClient.requestAccessToken({ prompt: 'select_account' });
   });
 }
 
@@ -54,11 +95,6 @@ export function signOut() {
   localStorage.removeItem('sdp_email');
 }
 
-export function isSignedIn() {
-  return !!getToken();
-}
-
-// Fetch the user's email for display purposes
 export async function getUserEmail() {
   const cached = localStorage.getItem('sdp_email');
   if (cached) return cached;

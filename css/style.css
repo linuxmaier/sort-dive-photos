@@ -294,6 +294,20 @@ label.field-label { font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
   margin-bottom: 2px;
 }
 
+/* ── Token banner ── */
+.token-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
 /* ── Utilities ── */
 .hidden { display: none !important; }
 .flex-row { display: flex; gap: 8px; }
