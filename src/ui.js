@@ -561,7 +561,16 @@ function bindEvents() {
 
   // Tag input
   const tagInput = $('tag-input');
-  tagInput.oninput = () => updateAutocomplete(tagInput.value);
+  tagInput.oninput = () => {
+    // On mobile, comma fires as an input event rather than a keydown.
+    // Split on commas immediately, commit all complete parts.
+    if (tagInput.value.includes(',')) {
+      const parts = tagInput.value.split(',');
+      parts.slice(0, -1).forEach(t => { if (t.trim()) addTag(t.trim()); });
+      tagInput.value = parts[parts.length - 1]; // keep any text after the last comma
+    }
+    updateAutocomplete(tagInput.value);
+  };
 
   // Commit a tag from the input field
   function commitTagInput() {
