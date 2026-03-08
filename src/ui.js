@@ -1,0 +1,545 @@
+import CONFIG from '../config.js';
+import { initAuth, signIn, signOut, isSignedIn, getUserEmail } from './auth.js';
+import { initSheets, loadTrips, loadDives, loadTagHistory, addTrip, addDive, ensureHeaders } from './sheets.js';
+import { addPendingClip, getPendingClips, deletePendingClip } from './db.js';
+import { syncPending, setupConnectivitySync, getPendingCount } from './sync.js';
+import { extractRawFilename, isOCRAvailable } from './ocr.js';
+
+// ── State ──────────────────────────────────────────────────────────────────
+const state = {
+  trips: [],
+  dives: [],
+  tagHistory: [],
+  currentTrip: null,
+  currentDive: null,
+  pendingFiles: [],   // { file, thumbnail, rawFile, recordedAt }
+  currentTags: [],
+  notes: '',
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const show = (id) => $(id).classList.remove('hidden');
+const hide = (id) => $(id).classList.add('hidden');
+
+function showPage(pageId) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById(pageId).classList.add('active');
+}
+
+function setStatus(msg, isError = false) {
+  const el = $('status-bar');
+  el.textContent = msg;
+  el.className = 'status-bar' + (isError ? ' error' : '');
+  if (msg) { show('status-bar'); setTimeout(() => hide('status-bar'), 4000); }
+}
+
+async function generateThumbnail(file) {
+  if (file.type.startsWith('image/')) {
+    return new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.readAsDataURL(file);
+    });
+  }
+  // Video: grab frame at 1s
+  return new Promise(resolve => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    const url = URL.createObjectURL(file);
+    video.src = url;
+    video.currentTime = 1;
+    const cleanup = () => URL.revokeObjectURL(url);
+    video.addEventListener('seeked', () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 240;
+      canvas.height = 135;
+      canvas.getContext('2d').drawImage(video, 0, 0, 240, 135);
+      cleanup();
+      resolve(canvas.toDataURL('image/jpeg', 0.75));
+    });
+    video.addEventListener('error', () => { cleanup(); resolve(null); });
+    video.load();
+  });
+}
+
+function parseFilenameDate(filename) {
+  // Exported Insta360 filenames: 20260307_150828_550.mp4
+  const m = filename.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+  if (!m) return '';
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+
+// ── Tag input ──────────────────────────────────────────────────────────────
+function renderTags() {
+  const container = $('tag-chips');
+  container.innerHTML = '';
+  state.currentTags.forEach(tag => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.innerHTML = `${tag} <button aria-label="Remove ${tag}">×</button>`;
+    chip.querySelector('button').onclick = () => removeTag(tag);
+    container.appendChild(chip);
+  });
+}
+
+function addTag(tag) {
+  const t = tag.trim().toLowerCase().replace(/\s+/g, '-');
+  if (t && !state.currentTags.includes(t)) {
+    state.currentTags.push(t);
+    renderTags();
+    updateAutocomplete('');
+    // Add to local history if new
+    if (!state.tagHistory.includes(t)) state.tagHistory.unshift(t);
+  }
+}
+
+function removeTag(tag) {
+  state.currentTags = state.currentTags.filter(t => t !== tag);
+  renderTags();
+}
+
+function updateAutocomplete(query) {
+  const box = $('autocomplete');
+  const q = query.toLowerCase();
+  const matches = state.tagHistory
+    .filter(t => !state.currentTags.includes(t) && (q === '' || t.includes(q)))
+    .slice(0, 8);
+
+  box.innerHTML = '';
+  if (!matches.length) { box.classList.remove('open'); return; }
+  matches.forEach(tag => {
+    const item = document.createElement('div');
+    item.className = 'autocomplete-item';
+    item.textContent = tag;
+    item.onmousedown = (e) => { e.preventDefault(); addTag(tag); $('tag-input').value = ''; };
+    box.appendChild(item);
+  });
+  box.classList.add('open');
+}
+
+// ── File handling ──────────────────────────────────────────────────────────
+async function handleFiles(files) {
+  const arr = Array.from(files);
+  if (!arr.length) return;
+
+  if (arr.length > 1) show('batch-warning');
+  else hide('batch-warning');
+
+  for (const file of arr) {
+    const thumbnail = await generateThumbnail(file);
+    state.pendingFiles.push({ file, thumbnail, rawFile: null, recordedAt: null });
+  }
+  renderFilePreviews();
+}
+
+function renderFilePreviews() {
+  const grid = $('file-grid');
+  grid.innerHTML = '';
+  state.pendingFiles.forEach((item, i) => {
+    const card = document.createElement('div');
+    card.className = 'file-card';
+
+    const img = document.createElement(item.file.type.startsWith('image/') ? 'img' : 'div');
+    if (item.thumbnail) {
+      const thumb = document.createElement('img');
+      thumb.src = item.thumbnail;
+      thumb.alt = item.file.name;
+      card.appendChild(thumb);
+    }
+
+    const name = document.createElement('div');
+    name.className = 'file-name';
+    name.textContent = item.file.name;
+    card.appendChild(name);
+
+    const exportDate = parseFilenameDate(item.file.name);
+    if (exportDate) {
+      const date = document.createElement('div');
+      date.className = 'file-meta';
+      date.textContent = `Exported: ${exportDate}`;
+      card.appendChild(date);
+    }
+
+    // Raw file info display
+    const rawInfo = document.createElement('div');
+    rawInfo.className = 'file-meta raw-info' + (item.rawFile ? ' has-data' : '');
+    rawInfo.id = `raw-info-${i}`;
+    rawInfo.textContent = item.rawFile
+      ? `Raw: ${item.rawFile} (${item.recordedAt})`
+      : 'No raw file linked';
+    card.appendChild(rawInfo);
+
+    // Screenshot upload button per file
+    const screenshotLabel = document.createElement('label');
+    screenshotLabel.className = 'btn btn-small btn-secondary';
+    screenshotLabel.textContent = item.rawFile ? 'Re-link raw file' : '+ Link Insta360 source';
+    const screenshotInput = document.createElement('input');
+    screenshotInput.type = 'file';
+    screenshotInput.accept = 'image/*';
+    screenshotInput.className = 'hidden';
+    screenshotInput.onchange = (e) => handleScreenshot(e.target.files[0], i);
+    screenshotLabel.appendChild(screenshotInput);
+    card.appendChild(screenshotLabel);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn btn-small btn-ghost remove-file';
+    removeBtn.textContent = 'Remove';
+    removeBtn.onclick = () => { state.pendingFiles.splice(i, 1); renderFilePreviews(); };
+    card.appendChild(removeBtn);
+
+    grid.appendChild(card);
+  });
+
+  if (state.pendingFiles.length) show('file-grid');
+  else hide('file-grid');
+
+  updateOCRNag();
+}
+
+function updateOCRNag() {
+  const unlinked = state.pendingFiles.filter(f => !f.rawFile).length;
+  const nag = $('ocr-nag');
+  if (unlinked > 0 && state.pendingFiles.length > 0) {
+    nag.textContent = `${unlinked} clip${unlinked > 1 ? 's' : ''} not yet linked to a raw Insta360 file — this helps with archival traceability.`;
+    show('ocr-nag');
+  } else {
+    hide('ocr-nag');
+  }
+}
+
+async function handleScreenshot(file, fileIndex) {
+  if (!file || !isOCRAvailable()) return;
+  setStatus('Reading Insta360 file info…');
+  const result = await extractRawFilename(file);
+  if (!result) {
+    setStatus('Could not find a VID_* filename in that screenshot. Try a cleaner crop.', true);
+    return;
+  }
+  state.pendingFiles[fileIndex].rawFile = result.rawFile;
+  state.pendingFiles[fileIndex].recordedAt = result.recordedAt;
+  renderFilePreviews();
+  setStatus(`Linked: ${result.rawFile}`);
+}
+
+// ── Shared files from service worker (Web Share Target) ────────────────────
+async function checkForSharedFiles() {
+  if (!location.search.includes('shared=true')) return;
+  // Clear the query param without a reload
+  history.replaceState({}, '', location.pathname);
+
+  try {
+    const cache = await caches.open('sdp-shares');
+    const indexResp = await cache.match('/sdp-share-index');
+    if (!indexResp) return;
+    const names = await indexResp.json();
+    const files = await Promise.all(names.map(async ({ name, type }) => {
+      const resp = await cache.match(`/sdp-share/${encodeURIComponent(name)}`);
+      if (!resp) return null;
+      const blob = await resp.blob();
+      return new File([blob], name, { type });
+    }));
+    // Clean up cache
+    await cache.delete('/sdp-share-index');
+    for (const { name } of names) await cache.delete(`/sdp-share/${encodeURIComponent(name)}`);
+
+    const validFiles = files.filter(Boolean);
+    if (validFiles.length) await handleFiles(validFiles);
+  } catch (err) {
+    console.warn('Could not read shared files:', err);
+  }
+}
+
+// ── Context (trip / dive) selectors ───────────────────────────────────────
+function renderTripSelect() {
+  const sel = $('trip-select');
+  sel.innerHTML = '<option value="">— select a trip —</option>';
+  state.trips.forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t.trip_id;
+    opt.textContent = t.name + (t.location ? ` · ${t.location}` : '');
+    sel.appendChild(opt);
+  });
+  const newOpt = document.createElement('option');
+  newOpt.value = '__new__';
+  newOpt.textContent = '+ New trip…';
+  sel.appendChild(newOpt);
+}
+
+function renderDiveSelect(tripId) {
+  const sel = $('dive-select');
+  sel.innerHTML = '<option value="">— select a dive —</option>';
+  const dives = state.dives.filter(d => d.trip_id === tripId);
+  dives.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.dive_id;
+    opt.textContent = `Dive ${d.dive_number}${d.site_name ? ' — ' + d.site_name : ''}`;
+    sel.appendChild(opt);
+  });
+  const newOpt = document.createElement('option');
+  newOpt.value = '__new__';
+  newOpt.textContent = '+ New dive…';
+  sel.appendChild(newOpt);
+}
+
+function updateContextBadge() {
+  const trip = state.currentTrip;
+  const dive = state.currentDive;
+  $('context-badge').textContent = trip
+    ? `${trip.name}${dive ? ' · Dive ' + dive.dive_number : ' · no dive selected'}`
+    : 'No context set';
+}
+
+// ── Queue page ─────────────────────────────────────────────────────────────
+async function renderQueue() {
+  const list = $('queue-list');
+  list.innerHTML = '';
+  const pending = await getPendingClips();
+  if (!pending.length) {
+    list.innerHTML = '<p class="empty-state">No pending clips.</p>';
+    return;
+  }
+  pending.forEach(clip => {
+    const row = document.createElement('div');
+    row.className = 'queue-row';
+    row.innerHTML = `
+      <div class="queue-filename">${clip.filename}</div>
+      <div class="queue-meta">${clip.tripName} · ${clip.diveLabel} · <em>${clip.tags || 'no tags'}</em></div>
+    `;
+    list.appendChild(row);
+  });
+}
+
+// ── Form submission ────────────────────────────────────────────────────────
+async function submitTags() {
+  if (!state.pendingFiles.length) { setStatus('No clips to save.', true); return; }
+  if (!state.currentTrip) { setStatus('Please select a trip first.', true); return; }
+  if (!state.currentDive) { setStatus('Please select a dive first.', true); return; }
+
+  const unlinked = state.pendingFiles.filter(f => !f.rawFile).length;
+  if (unlinked > 0) {
+    const ok = confirm(
+      `${unlinked} clip${unlinked > 1 ? 's are' : ' is'} not linked to a raw Insta360 file.\n\n` +
+      `This means the recording time and source file won't be tracked. Continue anyway?`
+    );
+    if (!ok) return;
+  }
+
+  const email = await getUserEmail() ?? 'unknown';
+  const taggedAt = new Date().toISOString();
+  const clips = state.pendingFiles.map(item => ({
+    id: crypto.randomUUID(),
+    filename: item.file.name,
+    rawFile: item.rawFile ?? '',
+    recordedAt: item.recordedAt ?? '',
+    tripId: state.currentTrip.trip_id,
+    tripName: state.currentTrip.name,
+    diveId: state.currentDive.dive_id,
+    diveLabel: `Dive ${state.currentDive.dive_number}${state.currentDive.site_name ? ' — ' + state.currentDive.site_name : ''}`,
+    tags: state.currentTags.join(', '),
+    notes: state.notes,
+    taggedAt,
+    taggedBy: email,
+  }));
+
+  // Save to IndexedDB first (works offline)
+  for (const clip of clips) await addPendingClip(clip);
+
+  setStatus(`Saved ${clips.length} clip${clips.length > 1 ? 's' : ''}. Syncing…`);
+
+  // Reset form
+  state.pendingFiles = [];
+  state.currentTags = [];
+  state.notes = '';
+  $('tag-input').value = '';
+  $('notes-input').value = '';
+  renderFilePreviews();
+  renderTags();
+  hide('file-grid');
+  hide('batch-warning');
+
+  // Attempt immediate sync
+  if (navigator.onLine) {
+    const result = await syncPending();
+    setStatus(result.failed
+      ? `Synced ${result.synced}, ${result.failed} failed — will retry when online.`
+      : `Synced ${result.synced} clip${result.synced > 1 ? 's' : ''} to Google Sheets.`
+    );
+    await updatePendingBadge();
+  }
+}
+
+async function updatePendingBadge() {
+  const count = await getPendingCount();
+  const badge = $('queue-badge');
+  badge.textContent = count > 0 ? count : '';
+  badge.classList.toggle('hidden', count === 0);
+}
+
+// ── New trip / dive modals ─────────────────────────────────────────────────
+async function handleNewTrip() {
+  const name = prompt('Trip name (e.g. Cozumel 2026):');
+  if (!name) return;
+  const location = prompt('Location (e.g. Cozumel, Mexico):') ?? '';
+  const startDate = prompt('Start date (YYYY-MM-DD):') ?? '';
+  const endDate = prompt('End date (YYYY-MM-DD):') ?? '';
+
+  const trip = { trip_id: crypto.randomUUID(), name, location, start_date: startDate, end_date: endDate };
+  try {
+    await addTrip({ id: trip.trip_id, name, location, startDate, endDate });
+  } catch {
+    setStatus('Saved locally — will write to Sheet when online.', false);
+  }
+  state.trips.unshift(trip);
+  renderTripSelect();
+  $('trip-select').value = trip.trip_id;
+  state.currentTrip = trip;
+  renderDiveSelect(trip.trip_id);
+  updateContextBadge();
+}
+
+async function handleNewDive() {
+  if (!state.currentTrip) { setStatus('Select a trip first.', true); return; }
+  const diveNumber = prompt('Dive number:');
+  if (!diveNumber) return;
+  const siteName = prompt('Site name (e.g. Palancar Reef):') ?? '';
+  const date = prompt('Date (YYYY-MM-DD):') ?? '';
+
+  const dive = {
+    dive_id: crypto.randomUUID(),
+    trip_id: state.currentTrip.trip_id,
+    trip_name: state.currentTrip.name,
+    dive_number: diveNumber,
+    site_name: siteName,
+    date,
+  };
+  try {
+    await addDive(dive);
+  } catch {
+    setStatus('Saved locally — will write to Sheet when online.', false);
+  }
+  state.dives.push(dive);
+  renderDiveSelect(state.currentTrip.trip_id);
+  $('dive-select').value = dive.dive_id;
+  state.currentDive = dive;
+  updateContextBadge();
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+export async function init() {
+  // Register service worker
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(console.warn);
+  }
+
+  await initAuth(CONFIG.GOOGLE_CLIENT_ID);
+  initSheets(CONFIG.SHEET_ID);
+
+  // Auth gate
+  if (!isSignedIn()) {
+    showPage('page-auth');
+    $('sign-in-btn').onclick = async () => {
+      await signIn();
+      await afterSignIn();
+    };
+    return;
+  }
+  await afterSignIn();
+}
+
+async function afterSignIn() {
+  showPage('page-tag');
+  $('user-email').textContent = (await getUserEmail()) ?? '';
+
+  // Load data (with offline fallback built into sheets.js)
+  try {
+    await ensureHeaders();
+    [state.trips, state.dives, state.tagHistory] = await Promise.all([
+      loadTrips(), loadDives(), loadTagHistory(),
+    ]);
+  } catch (err) {
+    console.warn('Failed to load from Sheets, using cache:', err);
+    setStatus('Offline — using cached data.', false);
+  }
+
+  renderTripSelect();
+  updateContextBadge();
+  await updatePendingBadge();
+  await checkForSharedFiles();
+
+  // Connectivity sync
+  setupConnectivitySync(async (result) => {
+    if (result.synced) setStatus(`Synced ${result.synced} pending clip${result.synced > 1 ? 's' : ''}.`);
+    await updatePendingBadge();
+  });
+
+  bindEvents();
+}
+
+function bindEvents() {
+  // Nav
+  $('nav-tag').onclick = () => { showPage('page-tag'); };
+  $('nav-queue').onclick = async () => { showPage('page-queue'); await renderQueue(); };
+
+  // Sign out
+  $('sign-out-btn').onclick = () => { signOut(); location.reload(); };
+
+  // Trip/dive selectors
+  $('trip-select').onchange = async (e) => {
+    if (e.target.value === '__new__') { await handleNewTrip(); return; }
+    state.currentTrip = state.trips.find(t => t.trip_id === e.target.value) ?? null;
+    state.currentDive = null;
+    if (state.currentTrip) renderDiveSelect(state.currentTrip.trip_id);
+    updateContextBadge();
+  };
+  $('dive-select').onchange = (e) => {
+    if (e.target.value === '__new__') { handleNewDive(); return; }
+    state.currentDive = state.dives.find(d => d.dive_id === e.target.value) ?? null;
+    updateContextBadge();
+  };
+
+  // File drop zone
+  const dropZone = $('drop-zone');
+  $('file-input').onchange = (e) => handleFiles(e.target.files);
+  dropZone.onclick = () => $('file-input').click();
+  dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); };
+  dropZone.ondragleave = () => dropZone.classList.remove('drag-over');
+  dropZone.ondrop = (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    handleFiles(e.dataTransfer.files);
+  };
+
+  // Tag input
+  const tagInput = $('tag-input');
+  tagInput.oninput = () => updateAutocomplete(tagInput.value);
+  tagInput.onkeydown = (e) => {
+    if ((e.key === 'Enter' || e.key === ',') && tagInput.value.trim()) {
+      e.preventDefault();
+      addTag(tagInput.value);
+      tagInput.value = '';
+    }
+    if (e.key === 'Escape') { $('autocomplete').classList.remove('open'); }
+  };
+  tagInput.onfocus = () => updateAutocomplete(tagInput.value);
+  tagInput.onblur = () => setTimeout(() => $('autocomplete').classList.remove('open'), 150);
+
+  // Notes
+  $('notes-input').oninput = (e) => { state.notes = e.target.value; };
+
+  // Submit
+  $('submit-btn').onclick = submitTags;
+
+  // Queue sync button
+  $('sync-btn').onclick = async () => {
+    setStatus('Syncing…');
+    const result = await syncPending();
+    setStatus(result.failed
+      ? `Synced ${result.synced}, ${result.failed} failed.`
+      : `Synced ${result.synced} clip${result.synced > 1 ? 's' : ''}.`
+    );
+    await updatePendingBadge();
+    await renderQueue();
+  };
+}

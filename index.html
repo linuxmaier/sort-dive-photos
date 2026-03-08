@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Sort Dive Photos</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="css/style.css">
+  <meta name="theme-color" content="#0066cc">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+</head>
+<body>
+  <div id="app">
+
+    <!-- Status bar (toast) -->
+    <div id="status-bar" class="status-bar hidden"></div>
+
+    <!-- ── Auth page ── -->
+    <div id="page-auth" class="page">
+      <h2>Sort Dive Photos</h2>
+      <p>Tag and organize your Insta360 dive footage. Sign in with the Google account that has access to the shared Sheet.</p>
+      <button id="sign-in-btn" class="btn btn-primary">Sign in with Google</button>
+    </div>
+
+    <!-- ── Tag page ── -->
+    <div id="page-tag" class="page">
+
+      <div class="app-header">
+        <h1>Sort Dive Photos</h1>
+        <div>
+          <span id="user-email"></span>
+          <button id="sign-out-btn" class="btn btn-ghost btn-small" style="margin-left:6px">Sign out</button>
+        </div>
+      </div>
+
+      <!-- Trip / Dive context -->
+      <div>
+        <div class="section-label">Trip & Dive</div>
+        <div class="flex-row" style="margin-bottom:6px">
+          <select id="trip-select" aria-label="Select trip"></select>
+          <select id="dive-select" aria-label="Select dive"></select>
+        </div>
+        <div id="context-badge" class="context-badge">No context set</div>
+      </div>
+
+      <!-- Batch warning -->
+      <div id="batch-warning" class="hidden">
+        These clips will share all tags below. They should all be from the same raw footage segment.
+      </div>
+
+      <!-- File input / drop zone -->
+      <div>
+        <div class="section-label">Clips</div>
+        <div id="drop-zone">
+          <div class="drop-icon">🎬</div>
+          <p>Tap to add clips, or drag &amp; drop</p>
+          <small>Share directly from your Photos app for best results</small>
+        </div>
+        <input id="file-input" type="file" accept="video/*,image/*" multiple class="hidden">
+      </div>
+
+      <!-- File previews -->
+      <div id="file-grid" class="hidden"></div>
+
+      <!-- OCR nag -->
+      <div id="ocr-nag" class="hidden"></div>
+
+      <!-- Tags -->
+      <div>
+        <div class="section-label">Tags</div>
+        <div id="tag-chips" style="margin-bottom:8px"></div>
+        <div class="tag-input-wrapper">
+          <input id="tag-input" type="text" placeholder="Type a tag and press Enter (e.g. turtle, wide-shot…)" autocomplete="off" autocorrect="off" autocapitalize="off">
+          <div id="autocomplete"></div>
+        </div>
+      </div>
+
+      <!-- Notes -->
+      <div>
+        <label class="section-label field-label" for="notes-input">Notes (optional)</label>
+        <textarea id="notes-input" placeholder="Any context about these clips…"></textarea>
+      </div>
+
+      <button id="submit-btn" class="btn btn-primary">Save tags</button>
+
+    </div>
+
+    <!-- ── Queue page ── -->
+    <div id="page-queue" class="page">
+      <div class="app-header">
+        <h1>Pending sync</h1>
+      </div>
+      <p style="font-size:13px;color:var(--text-dim)">
+        Clips saved here are stored on your device and will sync to Google Sheets when you're online.
+      </p>
+      <button id="sync-btn" class="btn btn-secondary">Sync now</button>
+      <div id="queue-list"></div>
+    </div>
+
+    <!-- ── Bottom nav ── -->
+    <nav class="bottom-nav">
+      <button id="nav-tag">Tag clips</button>
+      <button id="nav-queue">
+        Queue
+        <span id="queue-badge" class="badge hidden"></span>
+      </button>
+    </nav>
+
+  </div>
+
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- Tesseract.js for offline OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <script type="module">
+    import { init } from './src/ui.js';
+    init().catch(err => {
+      console.error(err);
+      document.getElementById('status-bar').textContent = 'Startup error: ' + err.message;
+      document.getElementById('status-bar').classList.remove('hidden');
+    });
+  </script>
+</body>
+</html>
