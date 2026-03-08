@@ -87,8 +87,10 @@ export async function loadDives() {
   }
 }
 
-export async function addDive({ id, tripId, tripName, diveNumber, siteName, date }) {
-  return appendValues('dives!A:F', [[id, tripId, tripName, diveNumber, siteName, date]]);
+export async function addDive(dive) {
+  return appendValues('dives!A:F', [[
+    dive.dive_id, dive.trip_id, dive.trip_name, dive.dive_number, dive.site_name, dive.date,
+  ]]);
 }
 
 // --- Tag history ---
