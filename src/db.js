@@ -2,7 +2,7 @@
 // Stores pending (unsynced) clips and cached data from Google Sheets.
 
 const DB_NAME = 'sdp';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let db = null;
 
@@ -17,6 +17,9 @@ export function openDB() {
       }
       if (!d.objectStoreNames.contains('cache')) {
         d.createObjectStore('cache', { keyPath: 'key' });
+      }
+      if (!d.objectStoreNames.contains('thumbnails')) {
+        d.createObjectStore('thumbnails', { keyPath: 'clip_id' });
       }
     };
     req.onsuccess = (e) => { db = e.target.result; resolve(db); };
@@ -46,6 +49,16 @@ export function getPendingClips() {
 
 export function deletePendingClip(id) {
   return tx('pending_clips', 'readwrite', s => s.delete(id));
+}
+
+// --- Thumbnails ---
+
+export function saveThumbnail(clipId, dataUrl) {
+  return tx('thumbnails', 'readwrite', s => s.put({ clip_id: clipId, dataUrl }));
+}
+
+export function getThumbnail(clipId) {
+  return tx('thumbnails', 'readonly', s => s.get(clipId)).then(entry => entry?.dataUrl ?? null);
 }
 
 // --- Generic cache (trips, dives, tags) ---

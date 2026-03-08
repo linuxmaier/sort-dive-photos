@@ -232,7 +232,8 @@ label.field-label { font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
 .chip button:hover { color: #fff; }
 
 #autocomplete,
-#category-autocomplete {
+#category-autocomplete,
+.filter-autocomplete {
   position: absolute;
   top: 100%;
   left: 0; right: 0;
@@ -246,7 +247,8 @@ label.field-label { font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
   overflow-y: auto;
 }
 #autocomplete.open,
-#category-autocomplete.open { display: block; }
+#category-autocomplete.open,
+.filter-autocomplete.open { display: block; }
 
 /* ── Category picker ── */
 .category-picker {
@@ -378,6 +380,81 @@ label.field-label { font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
   padding: 10px 12px;
   font-size: 13px;
 }
+
+/* ── Albums page ── */
+.album-card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.album-card:hover { border-color: var(--primary); }
+.album-card.suggested { border-left: 3px solid var(--teal); }
+.album-card-name { font-size: 15px; font-weight: 600; }
+.album-card-meta { font-size: 12px; color: var(--text-dim); }
+.album-card-pending { color: var(--warn); }
+.album-card-link { font-size: 12px; color: var(--primary); text-decoration: none; margin-top: 2px; display: inline-block; }
+.albums-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  padding: 6px 0 4px;
+}
+#albums-list, #albums-suggested { display: flex; flex-direction: column; gap: var(--gap); }
+
+/* ── Album detail grid ── */
+.album-clips-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 8px;
+}
+.album-clip-thumb {
+  background: var(--surface);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  cursor: pointer;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.album-clip-thumb:hover { border-color: var(--primary); }
+.album-clip-thumb.added { opacity: 0.35; cursor: default; }
+.album-clip-thumb img {
+  width: 100%;
+  aspect-ratio: 16/9;
+  object-fit: cover;
+  display: block;
+  background: var(--surface2);
+}
+.album-clip-thumb .thumb-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 3px 5px;
+  word-break: break-all;
+  line-height: 1.3;
+}
+
+/* ── Album creation filter builder ── */
+.filter-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+}
+.filter-row > select { flex: 0 0 110px; }
+.filter-value-wrapper { flex: 1; min-width: 0; position: relative; }
+.filter-value-wrapper select { width: 100%; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.album-preview-count { font-size: 13px; color: var(--teal); padding: 2px 0; }
+.album-photos-checkbox { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.album-photos-checkbox input[type="checkbox"] { width: auto; }
 
 /* ── Utilities ── */
 .hidden { display: none !important; }

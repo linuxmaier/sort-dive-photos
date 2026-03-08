@@ -12,6 +12,7 @@
 const SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets',
   'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/photoslibrary.appendonly',
 ].join(' ');
 
 let tokenClient = null;

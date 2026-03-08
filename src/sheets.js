@@ -142,6 +142,71 @@ export async function addClip(clip) {
   return appendValues('clips!A:L', [row]);
 }
 
+// --- Clips ---
+
+export async function loadClips() {
+  try {
+    const rows = await getValues('clips!A:L');
+    const clips = toObjects(rows);
+    await setCacheEntry('clips', clips);
+    return clips;
+  } catch {
+    return (await getCacheEntry('clips')) ?? [];
+  }
+}
+
+// --- Albums ---
+
+export async function loadAlbums() {
+  const parse = (json) => { try { return JSON.parse(json || '[]'); } catch { return []; } };
+  try {
+    const rows = await getValues('albums!A:G');
+    const albums = toObjects(rows).map(a => ({ ...a, filters: parse(a.filters_json) }));
+    await setCacheEntry('albums', albums);
+    return albums;
+  } catch {
+    const cached = (await getCacheEntry('albums')) ?? [];
+    return cached.map(a => ({ ...a, filters: a.filters ?? parse(a.filters_json) }));
+  }
+}
+
+export async function addAlbum(album) {
+  return appendValues('albums!A:G', [[
+    album.album_id, album.name, JSON.stringify(album.filters ?? []),
+    album.photos_album_id ?? '', album.photos_product_url ?? '',
+    album.created_at, album.created_by,
+  ]]);
+}
+
+// --- Album assignments ---
+
+export async function loadAlbumAssignments() {
+  try {
+    const rows = await getValues('album_assignments!A:D');
+    const assignments = toObjects(rows);
+    await setCacheEntry('album_assignments', assignments);
+    return assignments;
+  } catch {
+    return (await getCacheEntry('album_assignments')) ?? [];
+  }
+}
+
+export async function addAlbumAssignment(assignment) {
+  return appendValues('album_assignments!A:D', [[
+    assignment.clip_id, assignment.album_id, assignment.added_at, assignment.added_by,
+  ]]);
+}
+
+// --- Google Photos ---
+
+export async function createPhotosAlbum(name) {
+  const data = await authFetch('https://photoslibrary.googleapis.com/v1/albums', {
+    method: 'POST',
+    body: JSON.stringify({ album: { title: name } }),
+  });
+  return { id: data.id ?? '', productUrl: data.productUrl ?? '' };
+}
+
 // --- Tag categories ---
 
 export async function loadTagCategories() {
@@ -169,6 +234,8 @@ export async function ensureHeaders() {
     { range: 'clips!A1:L1', values: [['clip_id', 'filename', 'raw_file', 'recorded_at', 'trip_id', 'trip_name', 'dive_id', 'dive_label', 'tags', 'notes', 'tagged_at', 'tagged_by']] },
     { range: 'album_mapping!A1:C1', values: [['tag', 'album_name', 'album_id']] },
     { range: 'tag_categories!A1:B1', values: [['tag', 'category']] },
+    { range: 'albums!A1:G1', values: [['album_id', 'name', 'filters_json', 'photos_album_id', 'photos_product_url', 'created_at', 'created_by']] },
+    { range: 'album_assignments!A1:D1', values: [['clip_id', 'album_id', 'added_at', 'added_by']] },
   ];
 
   for (const { range, values } of checks) {

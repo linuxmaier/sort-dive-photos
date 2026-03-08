@@ -1,7 +1,7 @@
 import CONFIG from '../config.js';
 import { initAuth, signIn, signOut, isKnownUser, getToken, tryRefreshToken, getUserEmail } from './auth.js';
-import { initSheets, loadTrips, loadDives, loadTagHistory, loadParticipantHistory, loadTagCategories, addTrip, addDive, addTagCategory, ensureHeaders } from './sheets.js';
-import { addPendingClip, getPendingClips, deletePendingClip } from './db.js';
+import { initSheets, loadTrips, loadDives, loadTagHistory, loadParticipantHistory, loadTagCategories, addTrip, addDive, addTagCategory, ensureHeaders, loadClips, loadAlbums, addAlbum, loadAlbumAssignments, addAlbumAssignment, createPhotosAlbum } from './sheets.js';
+import { addPendingClip, getPendingClips, deletePendingClip, saveThumbnail, getThumbnail } from './db.js';
 import { syncPending, setupConnectivitySync, getPendingCount } from './sync.js';
 import { extractRawFilename, isOCRAvailable } from './ocr.js';
 
@@ -18,6 +18,9 @@ const state = {
   pendingFiles: [],   // { file, thumbnail, rawFile, recordedAt }
   currentTags: [],
   notes: '',
+  albums: [],          // album objects with parsed .filters array
+  albumAssignments: [], // { clip_id, album_id, added_at, added_by }
+  clips: [],           // snake_case, mirrors Sheet schema
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -410,6 +413,21 @@ async function submitTags() {
   // Save to IndexedDB first (works offline)
   for (const clip of clips) await addPendingClip(clip);
 
+  // Persist thumbnails for the Albums detail view
+  for (let i = 0; i < clips.length; i++) {
+    const thumb = state.pendingFiles[i]?.thumbnail;
+    if (thumb) { try { await saveThumbnail(clips[i].id, thumb); } catch { /* non-critical */ } }
+  }
+
+  // Push normalized clips to state.clips for immediate album matching
+  state.clips.push(...clips.map(c => ({
+    clip_id: c.id, filename: c.filename, raw_file: c.rawFile,
+    recorded_at: c.recordedAt, trip_id: c.tripId, trip_name: c.tripName,
+    dive_id: c.diveId, dive_label: c.diveLabel, tags: c.tags,
+    notes: c.notes, tagged_at: c.taggedAt, tagged_by: c.taggedBy,
+  })));
+  updateAlbumsBadge();
+
   setStatus(`Saved ${clips.length} clip${clips.length > 1 ? 's' : ''}. Syncing…`);
 
   // Reset form
@@ -446,8 +464,16 @@ let modalParticipants = [];
 
 function closeModal() { $('modal-overlay').classList.add('hidden'); }
 
+function resetModal() {
+  $('modal-confirm').classList.remove('hidden');
+  $('modal-confirm').textContent = 'Save';
+  $('modal-cancel').textContent = 'Cancel';
+  $('modal-footer').classList.remove('hidden');
+}
+
 function showTripModal() {
   return new Promise((resolve) => {
+    resetModal();
     $('modal-title').textContent = 'New Trip';
     $('modal-body').innerHTML = `
       <div class="field">
@@ -551,6 +577,7 @@ function setupParticipantInput() {
 
 function showDiveModal() {
   return new Promise((resolve) => {
+    resetModal();
     modalParticipants = [];
     $('modal-title').textContent = 'New Dive';
     $('modal-body').innerHTML = `
@@ -651,6 +678,452 @@ async function handleNewDive() {
   updateContextBadge();
 }
 
+// ── Albums ─────────────────────────────────────────────────────────────────
+
+function clipMatchesFilters(clip, filters) {
+  if (!filters || !filters.length) return true;
+  return filters.every(f => {
+    const vals = f.values ?? [];
+    if (!vals.length) return true;
+    switch (f.type) {
+      case 'trip': return vals.some(v => v === clip.trip_id);
+      case 'dive': return vals.some(v => v === clip.dive_id);
+      case 'tag': {
+        const clipTags = (clip.tags ?? '').split(',').map(t => t.trim()).filter(Boolean);
+        return vals.some(v => clipTags.includes(v));
+      }
+      case 'participant': {
+        const dive = state.dives.find(d => d.dive_id === clip.dive_id);
+        if (!dive) return false;
+        const parts = (dive.participants ?? '').split(',').map(p => p.trim()).filter(Boolean);
+        return vals.some(v => parts.includes(v));
+      }
+      default: return false;
+    }
+  });
+}
+
+function updateAlbumsBadge() {
+  const assignedSet = new Set(state.albumAssignments.map(a => `${a.clip_id}:${a.album_id}`));
+  let pending = 0;
+  for (const album of state.albums) {
+    for (const clip of state.clips) {
+      if (clipMatchesFilters(clip, album.filters) && !assignedSet.has(`${clip.clip_id}:${album.album_id}`)) pending++;
+    }
+  }
+  const badge = $('albums-badge');
+  badge.textContent = pending > 0 ? pending : '';
+  badge.classList.toggle('hidden', pending === 0);
+}
+
+function renderAlbumsList() {
+  const assignedSet = new Set(state.albumAssignments.map(a => `${a.clip_id}:${a.album_id}`));
+
+  // Suggested: trips with clips but no trip-only album
+  const tripsWithClips = [...new Set(state.clips.map(c => c.trip_id))];
+  const coveredTripIds = new Set(
+    state.albums
+      .filter(a => a.filters?.length === 1 && a.filters[0].type === 'trip' && a.filters[0].values?.length === 1)
+      .map(a => a.filters[0].values[0])
+  );
+  const suggestedTrips = tripsWithClips
+    .filter(tid => !coveredTripIds.has(tid))
+    .map(tid => state.trips.find(t => t.trip_id === tid))
+    .filter(Boolean);
+
+  const suggestedEl = $('albums-suggested');
+  suggestedEl.innerHTML = '';
+  if (suggestedTrips.length) {
+    const label = document.createElement('div');
+    label.className = 'albums-section-label';
+    label.textContent = 'Suggested';
+    suggestedEl.appendChild(label);
+    suggestedTrips.forEach(trip => {
+      const count = state.clips.filter(c => c.trip_id === trip.trip_id).length;
+      const card = document.createElement('div');
+      card.className = 'album-card suggested';
+      card.innerHTML = `
+        <div class="album-card-name">${trip.name} — All clips</div>
+        <div class="album-card-meta">${count} clip${count !== 1 ? 's' : ''} · suggested trip album</div>
+      `;
+      card.onclick = () => openAlbumCreationModal({
+        name: `${trip.name} — All clips`,
+        presetFilter: { type: 'trip', values: [trip.trip_id] },
+      });
+      suggestedEl.appendChild(card);
+    });
+  }
+
+  const listEl = $('albums-list');
+  listEl.innerHTML = '';
+  if (!state.albums.length) {
+    if (!suggestedTrips.length) {
+      listEl.innerHTML = '<p class="empty-state">No albums yet. Tap + New album to create one.</p>';
+    }
+    return;
+  }
+  if (suggestedTrips.length) {
+    const label = document.createElement('div');
+    label.className = 'albums-section-label';
+    label.textContent = 'Your albums';
+    listEl.appendChild(label);
+  }
+  state.albums.forEach(album => {
+    const matching = state.clips.filter(c => clipMatchesFilters(c, album.filters));
+    const pending = matching.filter(c => !assignedSet.has(`${c.clip_id}:${album.album_id}`)).length;
+    const card = document.createElement('div');
+    card.className = 'album-card';
+    const pendingHtml = pending > 0 ? ` · <span class="album-card-pending">${pending} pending</span>` : ' · all added';
+    card.innerHTML = `
+      <div class="album-card-name">${album.name}</div>
+      <div class="album-card-meta">${matching.length} clip${matching.length !== 1 ? 's' : ''}${pendingHtml}</div>
+      ${album.photos_product_url ? `<a class="album-card-link" href="${album.photos_product_url}" target="_blank" rel="noopener">Open in Google Photos ↗</a>` : ''}
+    `;
+    card.querySelector('a')?.addEventListener('click', e => e.stopPropagation());
+    card.onclick = () => showAlbumDetail(album);
+    listEl.appendChild(card);
+  });
+}
+
+function showAlbumDetail(album) {
+  hide('albums-list-view');
+  show('albums-detail-view');
+
+  $('albums-detail-name').textContent = album.name;
+
+  const assignedSet = new Set(
+    state.albumAssignments.filter(a => a.album_id === album.album_id).map(a => a.clip_id)
+  );
+  const matching = state.clips.filter(c => clipMatchesFilters(c, album.filters));
+  const pending = matching.filter(c => !assignedSet.has(c.clip_id)).length;
+
+  $('albums-detail-meta').textContent = `${pending} pending · ${matching.length} total${album.photos_product_url ? '' : ''}`;
+  if (album.photos_product_url) {
+    const link = document.createElement('a');
+    link.href = album.photos_product_url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.style.cssText = 'color:var(--primary);font-size:13px;margin-left:8px';
+    link.textContent = 'Open in Photos ↗';
+    $('albums-detail-meta').appendChild(link);
+  }
+
+  $('albums-mark-all-btn').onclick = () => markAllAdded(album, matching, assignedSet);
+
+  const grid = $('albums-detail-grid');
+  grid.innerHTML = '';
+  matching.forEach(clip => {
+    const isAdded = assignedSet.has(clip.clip_id);
+    const thumb = document.createElement('div');
+    thumb.className = 'album-clip-thumb' + (isAdded ? ' added' : '');
+    const img = document.createElement('img');
+    img.alt = clip.filename;
+    img.style.aspectRatio = '16/9';
+    const label = document.createElement('div');
+    label.className = 'thumb-label';
+    label.textContent = clip.filename;
+    thumb.appendChild(img);
+    thumb.appendChild(label);
+    getThumbnail(clip.clip_id).then(dataUrl => { if (dataUrl) img.src = dataUrl; else img.style.display = 'none'; });
+    if (!isAdded) thumb.onclick = () => showClipAlbumsModal(clip);
+    grid.appendChild(thumb);
+  });
+}
+
+function backToAlbumsList() {
+  hide('albums-detail-view');
+  show('albums-list-view');
+  renderAlbumsList();
+}
+
+function showClipAlbumsModal(clip) {
+  const assignedIds = new Set(
+    state.albumAssignments.filter(a => a.clip_id === clip.clip_id).map(a => a.album_id)
+  );
+  const pendingAlbums = state.albums.filter(a =>
+    clipMatchesFilters(clip, a.filters) && !assignedIds.has(a.album_id)
+  );
+
+  resetModal();
+  $('modal-title').textContent = clip.filename;
+  $('modal-confirm').classList.add('hidden');
+  $('modal-cancel').textContent = 'Close';
+
+  const body = $('modal-body');
+  body.innerHTML = '';
+
+  if (!pendingAlbums.length) {
+    body.innerHTML = '<p style="color:var(--text-dim);font-size:13px">This clip has been added to all matching albums.</p>';
+  } else {
+    const intro = document.createElement('div');
+    intro.className = 'field-label';
+    intro.style.marginBottom = '8px';
+    intro.textContent = 'Still needs to be added to:';
+    body.appendChild(intro);
+    pendingAlbums.forEach(album => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)';
+      const nameEl = document.createElement('span');
+      nameEl.textContent = album.name;
+      const markBtn = document.createElement('button');
+      markBtn.className = 'btn btn-small btn-secondary';
+      markBtn.textContent = 'Mark added';
+      markBtn.onclick = async () => {
+        await markClipAdded(clip, album);
+        markBtn.textContent = 'Done ✓';
+        markBtn.disabled = true;
+        markBtn.className = 'btn btn-small btn-ghost';
+      };
+      row.appendChild(nameEl);
+      row.appendChild(markBtn);
+      body.appendChild(row);
+    });
+  }
+
+  const close = () => { closeModal(); resetModal(); };
+  $('modal-cancel').onclick = close;
+  $('modal-overlay').onclick = (e) => { if (e.target === $('modal-overlay')) close(); };
+  $('modal-overlay').classList.remove('hidden');
+}
+
+async function markClipAdded(clip, album) {
+  const email = localStorage.getItem('sdp_email') ?? 'unknown';
+  const assignment = {
+    clip_id: clip.clip_id,
+    album_id: album.album_id,
+    added_at: new Date().toISOString(),
+    added_by: email,
+  };
+  state.albumAssignments.push(assignment);
+  updateAlbumsBadge();
+  try { await addAlbumAssignment(assignment); } catch { /* offline — will need to re-mark */ }
+}
+
+async function markAllAdded(album, clips, assignedSet) {
+  const unassigned = clips.filter(c => !assignedSet.has(c.clip_id));
+  if (!unassigned.length) { setStatus('All clips already marked.'); return; }
+  for (const clip of unassigned) await markClipAdded(clip, album);
+  setStatus(`Marked ${unassigned.length} clip${unassigned.length !== 1 ? 's' : ''} as added.`);
+  showAlbumDetail(album);
+}
+
+// ── Album creation modal ────────────────────────────────────────────────────
+let albumModalFilters = [];
+
+function openAlbumCreationModal(opts = {}) {
+  resetModal();
+  albumModalFilters = opts.presetFilter ? [{ ...opts.presetFilter }] : [];
+  $('modal-title').textContent = 'New Album';
+  $('modal-confirm').textContent = 'Create';
+  $('modal-body').innerHTML = `
+    <div class="field">
+      <label class="field-label" for="m-album-name">Album name *</label>
+      <input type="text" id="m-album-name" placeholder="e.g. Cozumel 2026 — Sharks" autocomplete="off">
+    </div>
+    <div class="field">
+      <div class="section-label" style="margin-bottom:6px">Filters</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">AND between filter types · OR within a type</div>
+      <div id="m-filter-rows" style="display:flex;flex-direction:column;gap:8px"></div>
+      <button type="button" id="m-add-filter" class="btn btn-small btn-ghost" style="margin-top:8px">+ Add filter</button>
+    </div>
+    <div id="m-album-preview" class="album-preview-count"></div>
+    <label class="album-photos-checkbox">
+      <input type="checkbox" id="m-create-photos-album">
+      Create album in Google Photos
+    </label>
+  `;
+  if (opts.name) $('m-album-name').value = opts.name;
+
+  renderFilterRows();
+  updateAlbumPreview();
+
+  $('m-add-filter').onclick = () => {
+    albumModalFilters.push({ type: 'tag', values: [] });
+    renderFilterRows();
+    updateAlbumPreview();
+  };
+
+  $('modal-overlay').classList.remove('hidden');
+  $('m-album-name').focus();
+
+  const done = () => { closeModal(); resetModal(); };
+  $('modal-cancel').onclick = done;
+  $('modal-overlay').onclick = (e) => { if (e.target === $('modal-overlay')) done(); };
+  $('modal-confirm').onclick = () => saveNewAlbum();
+}
+
+function renderFilterRows() {
+  const container = $('m-filter-rows');
+  container.innerHTML = '';
+  albumModalFilters.forEach((filter, idx) => {
+    const row = document.createElement('div');
+    row.className = 'filter-row';
+
+    const typeSelect = document.createElement('select');
+    ['trip', 'dive', 'tag', 'participant'].forEach(type => {
+      const opt = document.createElement('option');
+      opt.value = type;
+      opt.textContent = type.charAt(0).toUpperCase() + type.slice(1);
+      if (filter.type === type) opt.selected = true;
+      typeSelect.appendChild(opt);
+    });
+    typeSelect.onchange = () => {
+      albumModalFilters[idx] = { type: typeSelect.value, values: [] };
+      renderFilterRows();
+      updateAlbumPreview();
+    };
+    row.appendChild(typeSelect);
+
+    const valueWrapper = document.createElement('div');
+    valueWrapper.className = 'filter-value-wrapper';
+
+    if (filter.type === 'trip' || filter.type === 'dive') {
+      const sel = document.createElement('select');
+      const items = filter.type === 'trip' ? state.trips : state.dives;
+      sel.innerHTML = `<option value="">— select ${filter.type} —</option>`;
+      items.forEach(item => {
+        const opt = document.createElement('option');
+        opt.value = filter.type === 'trip' ? item.trip_id : item.dive_id;
+        opt.textContent = filter.type === 'trip'
+          ? item.name
+          : `Dive ${item.dive_number}${item.site_name ? ' — ' + item.site_name : ''} (${item.trip_name ?? ''})`;
+        if (filter.values[0] === opt.value) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.onchange = () => { albumModalFilters[idx].values = sel.value ? [sel.value] : []; updateAlbumPreview(); };
+      valueWrapper.appendChild(sel);
+    } else {
+      // Tag or Participant: chip input with autocomplete
+      const history = filter.type === 'tag' ? state.tagHistory : state.participantHistory;
+      const chipsEl = document.createElement('div');
+      chipsEl.className = 'filter-chips';
+
+      const renderChips = () => {
+        chipsEl.innerHTML = '';
+        albumModalFilters[idx].values.forEach(val => {
+          const chip = document.createElement('span');
+          chip.className = 'chip';
+          chip.innerHTML = `${val} <button aria-label="Remove ${val}">×</button>`;
+          chip.querySelector('button').onclick = () => {
+            albumModalFilters[idx].values = albumModalFilters[idx].values.filter(v => v !== val);
+            renderChips();
+            updateAlbumPreview();
+          };
+          chipsEl.appendChild(chip);
+        });
+      };
+      renderChips();
+
+      const inputWrapper = document.createElement('div');
+      inputWrapper.className = 'tag-input-wrapper';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = `Add ${filter.type}…`;
+      input.autocomplete = 'off';
+      const acBox = document.createElement('div');
+      acBox.className = 'filter-autocomplete';
+
+      const addVal = (v) => {
+        const trimmed = v.trim();
+        if (trimmed && !albumModalFilters[idx].values.includes(trimmed)) {
+          albumModalFilters[idx].values.push(trimmed);
+          renderChips();
+          updateAlbumPreview();
+        }
+        input.value = '';
+        acBox.classList.remove('open');
+      };
+      const updateAC = (q) => {
+        const matches = history.filter(h => !albumModalFilters[idx].values.includes(h) && (q === '' || h.includes(q))).slice(0, 6);
+        acBox.innerHTML = '';
+        if (!matches.length) { acBox.classList.remove('open'); return; }
+        matches.forEach(m => {
+          const item = document.createElement('div');
+          item.className = 'autocomplete-item';
+          item.textContent = m;
+          item.onmousedown = (e) => { e.preventDefault(); addVal(m); };
+          acBox.appendChild(item);
+        });
+        acBox.classList.add('open');
+      };
+      input.oninput = () => {
+        if (input.value.includes(',')) {
+          input.value.split(',').slice(0, -1).forEach(v => { if (v.trim()) addVal(v.trim()); });
+          input.value = input.value.split(',').pop();
+        }
+        updateAC(input.value);
+      };
+      input.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); if (input.value.trim()) addVal(input.value.trim()); } };
+      input.onfocus = () => updateAC(input.value);
+      input.onblur = () => setTimeout(() => { if (input.value.trim()) addVal(input.value.trim()); acBox.classList.remove('open'); }, 150);
+
+      inputWrapper.appendChild(input);
+      inputWrapper.appendChild(acBox);
+      valueWrapper.appendChild(chipsEl);
+      valueWrapper.appendChild(inputWrapper);
+    }
+    row.appendChild(valueWrapper);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn btn-small btn-ghost';
+    removeBtn.textContent = '✕';
+    removeBtn.style.flexShrink = '0';
+    removeBtn.onclick = () => { albumModalFilters.splice(idx, 1); renderFilterRows(); updateAlbumPreview(); };
+    row.appendChild(removeBtn);
+
+    container.appendChild(row);
+  });
+}
+
+function updateAlbumPreview() {
+  const el = $('m-album-preview');
+  if (!el) return;
+  const active = albumModalFilters.filter(f => f.values.length > 0);
+  const count = state.clips.filter(c => clipMatchesFilters(c, active)).length;
+  el.textContent = active.length ? `${count} clip${count !== 1 ? 's' : ''} match these filters` : '';
+}
+
+async function saveNewAlbum() {
+  const name = $('m-album-name')?.value.trim();
+  if (!name) { $('m-album-name').focus(); return; }
+
+  const filters = albumModalFilters.filter(f => f.values.length > 0);
+  const createInPhotos = $('m-create-photos-album')?.checked;
+
+  let photosAlbumId = '';
+  let photosProductUrl = '';
+  if (createInPhotos) {
+    try {
+      const result = await createPhotosAlbum(name);
+      photosAlbumId = result.id;
+      photosProductUrl = result.productUrl;
+    } catch {
+      setStatus('Could not create Google Photos album. Re-authenticate and ensure Photos access is granted.', true);
+      return;
+    }
+  }
+
+  const email = localStorage.getItem('sdp_email') ?? 'unknown';
+  const album = {
+    album_id: crypto.randomUUID(),
+    name,
+    filters,
+    filters_json: JSON.stringify(filters),
+    photos_album_id: photosAlbumId,
+    photos_product_url: photosProductUrl,
+    created_at: new Date().toISOString(),
+    created_by: email,
+  };
+
+  state.albums.push(album);
+  closeModal();
+  resetModal();
+  updateAlbumsBadge();
+  renderAlbumsList();
+
+  try { await addAlbum(album); } catch { setStatus('Album saved locally — will sync when online.', false); }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 export async function init() {
   // Register service worker
@@ -687,10 +1160,13 @@ function showTokenBanner(show) {
       await syncPending();
       try {
         await ensureHeaders();
-        [state.trips, state.dives, state.tagHistory, state.tagCategories] = await Promise.all([
+        [state.trips, state.dives, state.tagHistory, state.tagCategories,
+         state.albums, state.albumAssignments, state.clips] = await Promise.all([
           loadTrips(), loadDives(), loadTagHistory(), loadTagCategories(),
+          loadAlbums(), loadAlbumAssignments(), loadClips(),
         ]);
         state.categoryHistory = [...new Set(Object.values(state.tagCategories).filter(Boolean))];
+        updateAlbumsBadge();
         renderTripSelect();
       } catch {}
       await updatePendingBadge();
@@ -716,8 +1192,10 @@ async function afterSignIn() {
   // Load data (with offline fallback built into sheets.js)
   try {
     await ensureHeaders();
-    [state.trips, state.dives, state.tagHistory, state.participantHistory, state.tagCategories] = await Promise.all([
+    [state.trips, state.dives, state.tagHistory, state.participantHistory, state.tagCategories,
+     state.albums, state.albumAssignments, state.clips] = await Promise.all([
       loadTrips(), loadDives(), loadTagHistory(), loadParticipantHistory(), loadTagCategories(),
+      loadAlbums(), loadAlbumAssignments(), loadClips(),
     ]);
     state.categoryHistory = [...new Set(Object.values(state.tagCategories).filter(Boolean))];
   } catch (err) {
@@ -732,6 +1210,7 @@ async function afterSignIn() {
   renderTripSelect();
   updateContextBadge();
   await updatePendingBadge();
+  updateAlbumsBadge();
   await checkForSharedFiles();
 
   // Connectivity sync — also attempt silent token refresh when we come online
@@ -745,10 +1224,26 @@ async function afterSignIn() {
   bindEvents();
 }
 
+function setNavActive(id) {
+  document.querySelectorAll('.bottom-nav button').forEach(b => b.classList.remove('active'));
+  $(id).classList.add('active');
+}
+
 function bindEvents() {
   // Nav
-  $('nav-tag').onclick = () => { showPage('page-tag'); };
-  $('nav-queue').onclick = async () => { showPage('page-queue'); await renderQueue(); };
+  $('nav-tag').onclick = () => { showPage('page-tag'); setNavActive('nav-tag'); };
+  $('nav-albums').onclick = () => {
+    showPage('page-albums');
+    setNavActive('nav-albums');
+    show('albums-list-view');
+    hide('albums-detail-view');
+    renderAlbumsList();
+  };
+  $('nav-queue').onclick = async () => { showPage('page-queue'); setNavActive('nav-queue'); await renderQueue(); };
+
+  // Albums page
+  $('albums-back-btn').onclick = backToAlbumsList;
+  $('album-create-btn').onclick = () => openAlbumCreationModal();
 
   // Sign out
   $('sign-out-btn').onclick = () => { signOut(); location.reload(); };
