@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sdp-v4';
+const CACHE_NAME = 'sdp-v5';
 const SHARES_CACHE = 'sdp-shares';
 
 const STATIC_ASSETS = [

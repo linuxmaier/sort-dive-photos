@@ -1,6 +1,6 @@
 import CONFIG from '../config.js';
 import { initAuth, signIn, signOut, isKnownUser, getToken, tryRefreshToken, getUserEmail } from './auth.js';
-import { initSheets, loadTrips, loadDives, loadTagHistory, addTrip, addDive, ensureHeaders } from './sheets.js';
+import { initSheets, loadTrips, loadDives, loadTagHistory, loadParticipantHistory, addTrip, addDive, ensureHeaders } from './sheets.js';
 import { addPendingClip, getPendingClips, deletePendingClip } from './db.js';
 import { syncPending, setupConnectivitySync, getPendingCount } from './sync.js';
 import { extractRawFilename, isOCRAvailable } from './ocr.js';
@@ -10,6 +10,7 @@ const state = {
   trips: [],
   dives: [],
   tagHistory: [],
+  participantHistory: [],
   currentTrip: null,
   currentDive: null,
   pendingFiles: [],   // { file, thumbnail, rawFile, recordedAt }
@@ -384,17 +385,160 @@ async function updatePendingBadge() {
   badge.classList.toggle('hidden', count === 0);
 }
 
-// ── New trip / dive modals ─────────────────────────────────────────────────
-async function handleNewTrip() {
-  const name = prompt('Trip name (e.g. Cozumel 2026):');
-  if (!name) return;
-  const location = prompt('Location (e.g. Cozumel, Mexico):') ?? '';
-  const startDate = prompt('Start date (YYYY-MM-DD):') ?? '';
-  const endDate = prompt('End date (YYYY-MM-DD):') ?? '';
+// ── Modal forms ────────────────────────────────────────────────────────────
+let modalParticipants = [];
 
-  const trip = { trip_id: crypto.randomUUID(), name, location, start_date: startDate, end_date: endDate };
+function closeModal() { $('modal-overlay').classList.add('hidden'); }
+
+function showTripModal() {
+  return new Promise((resolve) => {
+    $('modal-title').textContent = 'New Trip';
+    $('modal-body').innerHTML = `
+      <div class="field">
+        <label class="field-label" for="m-trip-name">Trip name *</label>
+        <input type="text" id="m-trip-name" placeholder="e.g. Cozumel 2026" autocomplete="off">
+      </div>
+      <div class="field">
+        <label class="field-label" for="m-trip-location">Location</label>
+        <input type="text" id="m-trip-location" placeholder="e.g. Cozumel, Mexico" autocomplete="off">
+      </div>
+      <div class="flex-row">
+        <div class="field">
+          <label class="field-label" for="m-trip-start">Start date</label>
+          <input type="date" id="m-trip-start">
+        </div>
+        <div class="field">
+          <label class="field-label" for="m-trip-end">End date</label>
+          <input type="date" id="m-trip-end">
+        </div>
+      </div>`;
+    $('modal-overlay').classList.remove('hidden');
+    $('m-trip-name').focus();
+
+    const done = (result) => { closeModal(); resolve(result); };
+    $('modal-cancel').onclick = () => done(null);
+    $('modal-overlay').onclick = (e) => { if (e.target === $('modal-overlay')) done(null); };
+    $('modal-confirm').onclick = () => {
+      const name = $('m-trip-name').value.trim();
+      if (!name) { $('m-trip-name').focus(); return; }
+      done({ name, location: $('m-trip-location').value.trim(), startDate: $('m-trip-start').value, endDate: $('m-trip-end').value });
+    };
+  });
+}
+
+// ── Participant chip input (used inside dive modal) ─────────────────────────
+function renderParticipantChips() {
+  const container = $('m-participant-chips');
+  if (!container) return;
+  container.innerHTML = '';
+  modalParticipants.forEach(p => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.innerHTML = `${p} <button aria-label="Remove ${p}">×</button>`;
+    chip.querySelector('button').onclick = () => {
+      modalParticipants = modalParticipants.filter(x => x !== p);
+      renderParticipantChips();
+    };
+    container.appendChild(chip);
+  });
+}
+
+function addParticipant(name) {
+  const n = name.trim();
+  if (n && !modalParticipants.includes(n)) {
+    modalParticipants.push(n);
+    renderParticipantChips();
+    updateParticipantAutocomplete('');
+    if (!state.participantHistory.includes(n)) state.participantHistory.unshift(n);
+  }
+}
+
+function updateParticipantAutocomplete(query) {
+  const box = $('m-participant-autocomplete');
+  if (!box) return;
+  const q = query.toLowerCase();
+  const matches = state.participantHistory
+    .filter(p => !modalParticipants.includes(p) && (q === '' || p.toLowerCase().includes(q)))
+    .slice(0, 6);
+  box.innerHTML = '';
+  if (!matches.length) { box.classList.remove('open'); return; }
+  matches.forEach(p => {
+    const item = document.createElement('div');
+    item.className = 'autocomplete-item';
+    item.textContent = p;
+    item.onmousedown = (e) => { e.preventDefault(); addParticipant(p); $('m-participant-input').value = ''; };
+    box.appendChild(item);
+  });
+  box.classList.add('open');
+}
+
+function setupParticipantInput() {
+  const input = $('m-participant-input');
+  if (!input) return;
+  const commit = () => { if (input.value.trim()) { addParticipant(input.value.trim()); input.value = ''; return true; } return false; };
+  input.oninput = () => {
+    if (input.value.includes(',')) {
+      input.value.split(',').slice(0, -1).forEach(p => { if (p.trim()) addParticipant(p.trim()); });
+      input.value = input.value.split(',').pop();
+    }
+    updateParticipantAutocomplete(input.value);
+  };
+  input.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); } };
+  input.onkeyup = (e) => { if (e.key === 'Enter') commit(); };
+  input.onfocus = () => updateParticipantAutocomplete(input.value);
+  input.onblur = () => setTimeout(() => { commit(); const box = $('m-participant-autocomplete'); if (box) box.classList.remove('open'); }, 150);
+}
+
+function showDiveModal() {
+  return new Promise((resolve) => {
+    modalParticipants = [];
+    $('modal-title').textContent = 'New Dive';
+    $('modal-body').innerHTML = `
+      <div class="flex-row">
+        <div class="field">
+          <label class="field-label" for="m-dive-number">Dive #</label>
+          <input type="number" id="m-dive-number" min="1" placeholder="1">
+        </div>
+        <div class="field">
+          <label class="field-label" for="m-dive-date">Date</label>
+          <input type="date" id="m-dive-date">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="m-dive-site">Site name</label>
+        <input type="text" id="m-dive-site" placeholder="e.g. Palancar Reef" autocomplete="off">
+      </div>
+      <div class="field">
+        <label class="field-label">Participants</label>
+        <div id="m-participant-chips" style="margin-bottom:8px"></div>
+        <div class="tag-input-wrapper">
+          <input type="text" id="m-participant-input" placeholder="Add people and press Enter…" autocomplete="off" autocorrect="off">
+          <div id="m-participant-autocomplete" class="autocomplete"></div>
+        </div>
+      </div>`;
+    $('modal-overlay').classList.remove('hidden');
+    setupParticipantInput();
+    $('m-dive-number').focus();
+
+    const done = (result) => { closeModal(); resolve(result); };
+    $('modal-cancel').onclick = () => done(null);
+    $('modal-overlay').onclick = (e) => { if (e.target === $('modal-overlay')) done(null); };
+    $('modal-confirm').onclick = () => {
+      const diveNumber = $('m-dive-number').value.trim();
+      if (!diveNumber) { $('m-dive-number').focus(); return; }
+      const input = $('m-participant-input');
+      if (input?.value.trim()) addParticipant(input.value.trim());
+      done({ diveNumber, siteName: $('m-dive-site').value.trim(), date: $('m-dive-date').value, participants: modalParticipants.join(', ') });
+    };
+  });
+}
+
+async function handleNewTrip() {
+  const data = await showTripModal();
+  if (!data) return;
+  const trip = { trip_id: crypto.randomUUID(), name: data.name, location: data.location, start_date: data.startDate, end_date: data.endDate };
   try {
-    await addTrip({ id: trip.trip_id, name, location, startDate, endDate });
+    await addTrip({ id: trip.trip_id, name: data.name, location: data.location, startDate: data.startDate, endDate: data.endDate });
   } catch {
     setStatus('Saved locally — will write to Sheet when online.', false);
   }
@@ -408,18 +552,16 @@ async function handleNewTrip() {
 
 async function handleNewDive() {
   if (!state.currentTrip) { setStatus('Select a trip first.', true); return; }
-  const diveNumber = prompt('Dive number:');
-  if (!diveNumber) return;
-  const siteName = prompt('Site name (e.g. Palancar Reef):') ?? '';
-  const date = prompt('Date (YYYY-MM-DD):') ?? '';
-
+  const data = await showDiveModal();
+  if (!data) return;
   const dive = {
     dive_id: crypto.randomUUID(),
     trip_id: state.currentTrip.trip_id,
     trip_name: state.currentTrip.name,
-    dive_number: diveNumber,
-    site_name: siteName,
-    date,
+    dive_number: data.diveNumber,
+    site_name: data.siteName,
+    date: data.date,
+    participants: data.participants,
   };
   try {
     await addDive(dive);
@@ -497,8 +639,8 @@ async function afterSignIn() {
   // Load data (with offline fallback built into sheets.js)
   try {
     await ensureHeaders();
-    [state.trips, state.dives, state.tagHistory] = await Promise.all([
-      loadTrips(), loadDives(), loadTagHistory(),
+    [state.trips, state.dives, state.tagHistory, state.participantHistory] = await Promise.all([
+      loadTrips(), loadDives(), loadTagHistory(), loadParticipantHistory(),
     ]);
   } catch (err) {
     console.warn('Failed to load from Sheets, using cache:', err);

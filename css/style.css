@@ -294,6 +294,54 @@ label.field-label { font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
   margin-bottom: 2px;
 }
 
+/* ── Modal ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+}
+.modal-overlay.hidden { display: none !important; }
+
+.modal {
+  background: var(--surface);
+  border-radius: var(--radius) var(--radius) 0 0;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.modal-header {
+  padding: 16px var(--gap) 0;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+.modal-header h2 { font-size: 17px; color: var(--teal); }
+.modal-body {
+  padding: var(--gap);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  overflow-y: auto;
+}
+.modal-footer {
+  display: flex;
+  gap: 8px;
+  padding: var(--gap);
+  border-top: 1px solid var(--border);
+}
+.modal-footer .btn-primary { flex: 1; }
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+
+@media (min-width: 480px) {
+  .modal-overlay { align-items: center; }
+  .modal { border-radius: var(--radius); max-width: 480px; margin: auto; max-height: 80vh; }
+}
+
 /* ── Token banner ── */
 .token-banner {
   display: flex;

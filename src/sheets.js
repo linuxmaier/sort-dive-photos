@@ -78,7 +78,7 @@ export async function addTrip({ id, name, location, startDate, endDate }) {
 
 export async function loadDives() {
   try {
-    const rows = await getValues('dives!A:F');
+    const rows = await getValues('dives!A:G');
     const dives = toObjects(rows);
     await setCacheEntry('dives', dives);
     return dives;
@@ -88,9 +88,22 @@ export async function loadDives() {
 }
 
 export async function addDive(dive) {
-  return appendValues('dives!A:F', [[
-    dive.dive_id, dive.trip_id, dive.trip_name, dive.dive_number, dive.site_name, dive.date,
+  return appendValues('dives!A:G', [[
+    dive.dive_id, dive.trip_id, dive.trip_name, dive.dive_number, dive.site_name, dive.date, dive.participants ?? '',
   ]]);
+}
+
+export async function loadParticipantHistory() {
+  try {
+    const rows = await getValues('dives!G:G'); // participants column
+    const participants = rows.slice(1)
+      .flatMap(r => (r[0] ?? '').split(',').map(p => p.trim()).filter(Boolean));
+    const unique = [...new Set(participants)];
+    await setCacheEntry('participant_history', unique);
+    return unique;
+  } catch {
+    return (await getCacheEntry('participant_history')) ?? [];
+  }
 }
 
 // --- Tag history ---
@@ -134,7 +147,7 @@ export async function addClip(clip) {
 export async function ensureHeaders() {
   const checks = [
     { range: 'trips!A1:E1', values: [['trip_id', 'name', 'location', 'start_date', 'end_date']] },
-    { range: 'dives!A1:F1', values: [['dive_id', 'trip_id', 'trip_name', 'dive_number', 'site_name', 'date']] },
+    { range: 'dives!A1:G1', values: [['dive_id', 'trip_id', 'trip_name', 'dive_number', 'site_name', 'date', 'participants']] },
     { range: 'clips!A1:L1', values: [['clip_id', 'filename', 'raw_file', 'recorded_at', 'trip_id', 'trip_name', 'dive_id', 'dive_label', 'tags', 'notes', 'tagged_at', 'tagged_by']] },
     { range: 'album_mapping!A1:C1', values: [['tag', 'album_name', 'album_id']] },
   ];
