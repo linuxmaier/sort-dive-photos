@@ -239,12 +239,30 @@ export async function ensureHeaders() {
   ];
 
   for (const { range, values } of checks) {
-    const existing = await getValues(range);
-    if (!existing.length || !existing[0].length) {
-      await authFetch(
-        `${rangeUrl(range)}?valueInputOption=USER_ENTERED`,
-        { method: 'PUT', body: JSON.stringify({ values }) }
-      );
+    const tabName = range.split('!')[0];
+    try {
+      const existing = await getValues(range);
+      if (!existing.length || !existing[0].length) {
+        await authFetch(
+          `${rangeUrl(range)}?valueInputOption=USER_ENTERED`,
+          { method: 'PUT', body: JSON.stringify({ values }) }
+        );
+      }
+    } catch {
+      // Tab likely doesn't exist yet — create it, then write headers
+      try {
+        await authFetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
+          { method: 'POST', body: JSON.stringify({ requests: [{ addSheet: { properties: { title: tabName } } }] }) }
+        );
+        await authFetch(
+          `${rangeUrl(range)}?valueInputOption=USER_ENTERED`,
+          { method: 'PUT', body: JSON.stringify({ values }) }
+        );
+      } catch {
+        // Already exists or insufficient permissions — not fatal, continue
+        console.warn(`ensureHeaders: could not initialize tab "${tabName}"`);
+      }
     }
   }
 }
