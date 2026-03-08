@@ -317,6 +317,13 @@ async function submitTags() {
   if (!state.currentTrip) { setStatus('Please select a trip first.', true); return; }
   if (!state.currentDive) { setStatus('Please select a dive first.', true); return; }
 
+  // Auto-commit any text still in the tag input so users don't have to press Enter
+  const tagInput = $('tag-input');
+  if (tagInput.value.trim()) {
+    addTag(tagInput.value.trim());
+    tagInput.value = '';
+  }
+
   const unlinked = state.pendingFiles.filter(f => !f.rawFile).length;
   if (unlinked > 0) {
     const ok = confirm(
