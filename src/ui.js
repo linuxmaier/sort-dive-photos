@@ -562,16 +562,34 @@ function bindEvents() {
   // Tag input
   const tagInput = $('tag-input');
   tagInput.oninput = () => updateAutocomplete(tagInput.value);
-  tagInput.onkeydown = (e) => {
-    if ((e.key === 'Enter' || e.key === ',') && tagInput.value.trim()) {
-      e.preventDefault();
-      addTag(tagInput.value);
+
+  // Commit a tag from the input field
+  function commitTagInput() {
+    if (tagInput.value.trim()) {
+      addTag(tagInput.value.trim());
       tagInput.value = '';
+      return true;
     }
+    return false;
+  }
+
+  // keydown handles physical keyboards; keyup catches mobile virtual keyboards
+  // which often don't fire keydown reliably for Enter
+  tagInput.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commitTagInput(); }
     if (e.key === 'Escape') { $('autocomplete').classList.remove('open'); }
   };
+  tagInput.onkeyup = (e) => {
+    if (e.key === 'Enter') commitTagInput();
+  };
+
   tagInput.onfocus = () => updateAutocomplete(tagInput.value);
-  tagInput.onblur = () => setTimeout(() => $('autocomplete').classList.remove('open'), 150);
+  // On blur, commit whatever is in the field (e.g. tapping away on mobile).
+  // The 150ms delay is kept so autocomplete item taps still register first.
+  tagInput.onblur = () => setTimeout(() => {
+    commitTagInput();
+    $('autocomplete').classList.remove('open');
+  }, 150);
 
   // Notes
   $('notes-input').oninput = (e) => { state.notes = e.target.value; };
