@@ -415,6 +415,10 @@ function showTripModal() {
     $('modal-overlay').classList.remove('hidden');
     $('m-trip-name').focus();
 
+    // Enforce start ≤ end date order
+    $('m-trip-start').onchange = () => { $('m-trip-end').min = $('m-trip-start').value; };
+    $('m-trip-end').onchange = () => { $('m-trip-start').max = $('m-trip-end').value; };
+
     const done = (result) => { closeModal(); resolve(result); };
     $('modal-cancel').onclick = () => done(null);
     $('modal-overlay').onclick = (e) => { if (e.target === $('modal-overlay')) done(null); };
@@ -517,8 +521,24 @@ function showDiveModal() {
         </div>
       </div>`;
     $('modal-overlay').classList.remove('hidden');
+
+    // Set date constraints and default from the current trip's date range
+    const dateInput = $('m-dive-date');
+    const trip = state.currentTrip;
+    if (trip?.start_date) { dateInput.min = trip.start_date; dateInput.value = trip.start_date; }
+    if (trip?.end_date) { dateInput.max = trip.end_date; }
+
+    // Auto-populate dive number: count existing dives on the selected date (per-day)
+    function suggestDiveNumber(date) {
+      if (!date || !trip) return;
+      const count = state.dives.filter(d => d.trip_id === trip.trip_id && d.date === date).length;
+      $('m-dive-number').value = count + 1;
+    }
+    suggestDiveNumber(dateInput.value);
+    dateInput.onchange = () => suggestDiveNumber(dateInput.value);
+
     setupParticipantInput();
-    $('m-dive-number').focus();
+    dateInput.focus();
 
     const done = (result) => { closeModal(); resolve(result); };
     $('modal-cancel').onclick = () => done(null);
