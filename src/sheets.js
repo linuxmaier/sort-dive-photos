@@ -142,6 +142,24 @@ export async function addClip(clip) {
   return appendValues('clips!A:L', [row]);
 }
 
+// --- Tag categories ---
+
+export async function loadTagCategories() {
+  try {
+    const rows = await getValues('tag_categories!A:B');
+    const items = toObjects(rows); // [{tag, category}, ...]
+    const map = Object.fromEntries(items.map(c => [c.tag, c.category]).filter(([t]) => t));
+    await setCacheEntry('tag_categories', map);
+    return map;
+  } catch {
+    return (await getCacheEntry('tag_categories')) ?? {};
+  }
+}
+
+export async function addTagCategory(tag, category) {
+  return appendValues('tag_categories!A:B', [[tag, category]]);
+}
+
 // --- Sheet initialisation (creates headers if sheets are empty) ---
 
 export async function ensureHeaders() {
@@ -150,6 +168,7 @@ export async function ensureHeaders() {
     { range: 'dives!A1:G1', values: [['dive_id', 'trip_id', 'trip_name', 'dive_number', 'site_name', 'date', 'participants']] },
     { range: 'clips!A1:L1', values: [['clip_id', 'filename', 'raw_file', 'recorded_at', 'trip_id', 'trip_name', 'dive_id', 'dive_label', 'tags', 'notes', 'tagged_at', 'tagged_by']] },
     { range: 'album_mapping!A1:C1', values: [['tag', 'album_name', 'album_id']] },
+    { range: 'tag_categories!A1:B1', values: [['tag', 'category']] },
   ];
 
   for (const { range, values } of checks) {

@@ -77,6 +77,15 @@
       <div>
         <div class="section-label">Tags</div>
         <div id="tag-chips" style="margin-bottom:8px"></div>
+        <div id="category-picker" class="category-picker hidden">
+          <div class="category-picker-label">Category for "<span id="category-picker-tag"></span>"</div>
+          <div id="category-chips-list"></div>
+          <div class="tag-input-wrapper">
+            <input type="text" id="category-input" placeholder="New category…" autocomplete="off" autocorrect="off" autocapitalize="off">
+            <div id="category-autocomplete" class="autocomplete"></div>
+          </div>
+          <button id="category-skip" class="btn btn-ghost btn-small">Skip</button>
+        </div>
         <div class="tag-input-wrapper">
           <input id="tag-input" type="text" placeholder="Type a tag and press Enter (e.g. turtle, wide-shot…)" autocomplete="off" autocorrect="off" autocapitalize="off">
           <div id="autocomplete"></div>

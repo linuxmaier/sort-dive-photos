@@ -231,7 +231,8 @@ label.field-label { font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
 }
 .chip button:hover { color: #fff; }
 
-#autocomplete {
+#autocomplete,
+#category-autocomplete {
   position: absolute;
   top: 100%;
   left: 0; right: 0;
@@ -244,7 +245,29 @@ label.field-label { font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
   max-height: 200px;
   overflow-y: auto;
 }
-#autocomplete.open { display: block; }
+#autocomplete.open,
+#category-autocomplete.open { display: block; }
+
+/* ── Category picker ── */
+.category-picker {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.category-picker-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+#category-chips-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .autocomplete-item {
   padding: 8px 12px;
   cursor: pointer;

@@ -1,6 +1,6 @@
 import CONFIG from '../config.js';
 import { initAuth, signIn, signOut, isKnownUser, getToken, tryRefreshToken, getUserEmail } from './auth.js';
-import { initSheets, loadTrips, loadDives, loadTagHistory, loadParticipantHistory, addTrip, addDive, ensureHeaders } from './sheets.js';
+import { initSheets, loadTrips, loadDives, loadTagHistory, loadParticipantHistory, loadTagCategories, addTrip, addDive, addTagCategory, ensureHeaders } from './sheets.js';
 import { addPendingClip, getPendingClips, deletePendingClip } from './db.js';
 import { syncPending, setupConnectivitySync, getPendingCount } from './sync.js';
 import { extractRawFilename, isOCRAvailable } from './ocr.js';
@@ -11,6 +11,8 @@ const state = {
   dives: [],
   tagHistory: [],
   participantHistory: [],
+  tagCategories: {},   // tag → category
+  categoryHistory: [], // unique categories
   currentTrip: null,
   currentDive: null,
   pendingFiles: [],   // { file, thumbnail, rawFile, recordedAt }
@@ -91,8 +93,10 @@ function addTag(tag) {
     state.currentTags.push(t);
     renderTags();
     updateAutocomplete('');
-    // Add to local history if new
-    if (!state.tagHistory.includes(t)) state.tagHistory.unshift(t);
+    const isNew = !state.tagHistory.includes(t);
+    if (isNew) state.tagHistory.unshift(t);
+    // Prompt for a category only if this tag has never been categorised before
+    if (isNew && !state.tagCategories[t]) showCategoryPicker(t);
   }
 }
 
@@ -115,6 +119,58 @@ function updateAutocomplete(query) {
     item.className = 'autocomplete-item';
     item.textContent = tag;
     item.onmousedown = (e) => { e.preventDefault(); addTag(tag); $('tag-input').value = ''; };
+    box.appendChild(item);
+  });
+  box.classList.add('open');
+}
+
+// ── Category picker ────────────────────────────────────────────────────────
+let pickerTag = null;
+
+function showCategoryPicker(tag) {
+  pickerTag = tag;
+  $('category-picker-tag').textContent = tag;
+
+  const list = $('category-chips-list');
+  list.innerHTML = '';
+  state.categoryHistory.forEach(cat => {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-small btn-secondary';
+    btn.textContent = cat;
+    btn.onmousedown = (e) => { e.preventDefault(); assignCategory(tag, cat); };
+    list.appendChild(btn);
+  });
+
+  $('category-input').value = '';
+  $('category-picker').classList.remove('hidden');
+}
+
+function hideCategoryPicker() {
+  $('category-picker').classList.add('hidden');
+  $('category-autocomplete').classList.remove('open');
+  pickerTag = null;
+}
+
+async function assignCategory(tag, category) {
+  const cat = category.trim();
+  if (!cat) { hideCategoryPicker(); return; }
+  state.tagCategories[tag] = cat;
+  if (!state.categoryHistory.includes(cat)) state.categoryHistory.push(cat);
+  hideCategoryPicker();
+  try { await addTagCategory(tag, cat); } catch { /* offline — local state updated, sheet write skipped */ }
+}
+
+function updateCategoryAutocomplete(query) {
+  const box = $('category-autocomplete');
+  const q = query.toLowerCase();
+  const matches = state.categoryHistory.filter(c => q === '' || c.toLowerCase().includes(q)).slice(0, 6);
+  box.innerHTML = '';
+  if (!matches.length) { box.classList.remove('open'); return; }
+  matches.forEach(cat => {
+    const item = document.createElement('div');
+    item.className = 'autocomplete-item';
+    item.textContent = cat;
+    item.onmousedown = (e) => { e.preventDefault(); assignCategory(pickerTag, cat); };
     box.appendChild(item);
   });
   box.classList.add('open');
@@ -631,9 +687,10 @@ function showTokenBanner(show) {
       await syncPending();
       try {
         await ensureHeaders();
-        [state.trips, state.dives, state.tagHistory] = await Promise.all([
-          loadTrips(), loadDives(), loadTagHistory(),
+        [state.trips, state.dives, state.tagHistory, state.tagCategories] = await Promise.all([
+          loadTrips(), loadDives(), loadTagHistory(), loadTagCategories(),
         ]);
+        state.categoryHistory = [...new Set(Object.values(state.tagCategories).filter(Boolean))];
         renderTripSelect();
       } catch {}
       await updatePendingBadge();
@@ -659,9 +716,10 @@ async function afterSignIn() {
   // Load data (with offline fallback built into sheets.js)
   try {
     await ensureHeaders();
-    [state.trips, state.dives, state.tagHistory, state.participantHistory] = await Promise.all([
-      loadTrips(), loadDives(), loadTagHistory(), loadParticipantHistory(),
+    [state.trips, state.dives, state.tagHistory, state.participantHistory, state.tagCategories] = await Promise.all([
+      loadTrips(), loadDives(), loadTagHistory(), loadParticipantHistory(), loadTagCategories(),
     ]);
+    state.categoryHistory = [...new Set(Object.values(state.tagCategories).filter(Boolean))];
   } catch (err) {
     console.warn('Failed to load from Sheets, using cache:', err);
     if (!getToken()) {
@@ -754,13 +812,24 @@ function bindEvents() {
     if (e.key === 'Enter') commitTagInput();
   };
 
-  tagInput.onfocus = () => updateAutocomplete(tagInput.value);
+  tagInput.onfocus = () => { hideCategoryPicker(); updateAutocomplete(tagInput.value); };
   // On blur, commit whatever is in the field (e.g. tapping away on mobile).
   // The 150ms delay is kept so autocomplete item taps still register first.
   tagInput.onblur = () => setTimeout(() => {
     commitTagInput();
     $('autocomplete').classList.remove('open');
   }, 150);
+
+  // Category picker
+  const categoryInput = $('category-input');
+  categoryInput.oninput = () => updateCategoryAutocomplete(categoryInput.value);
+  categoryInput.onfocus = () => updateCategoryAutocomplete(categoryInput.value);
+  categoryInput.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); assignCategory(pickerTag, categoryInput.value); }
+    if (e.key === 'Escape') hideCategoryPicker();
+  };
+  categoryInput.onblur = () => setTimeout(() => $('category-autocomplete').classList.remove('open'), 150);
+  $('category-skip').onclick = hideCategoryPicker;
 
   // Notes
   $('notes-input').oninput = (e) => { state.notes = e.target.value; };
